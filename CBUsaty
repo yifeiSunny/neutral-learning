@@ -1,0 +1,679 @@
+import os
+import tensorflow as tf
+import numpy as np
+
+
+FILENAME_TRAIN="summary.csv" #数据所在文件
+FILENAME_TEST="summary2.csv"
+
+EXAMPLES=70000
+BATCH_SIZE=50 #定义每次输入的数据个数
+INPUT_NODE=107 #表示每个batch有多少列，也就是有几个特征参数
+LAYER1_NODE=9 #表示第一层的节点数
+LAYER2_NODE=6 #表示第二层的节点数
+LAYER3_NODE=14 #表示第二层的节点数
+OUTPUT_NODE=1  #表示最后一层输出节点，表示节点数
+MIN_AFTER_DEQUEUE=1000 #文件读取队列剩余数量
+
+LEARNING_RATE_BASE= 0.001 #初始化学习率
+LEARNING_RATE_DECAY=0.9 #定义学习率衰减系数
+REGULARIZER=0.00001 #定义正则化系数
+MOVING_AVERAGE_DECAY=0.99 #定义滑动平均衰减率
+
+MODEL_SAVE_PATH="/Users/sun/Desktop/麻醉/model/"
+MODEL_NAME="model.ckpt"
+META_DIR="/Users/sun/Desktop/麻醉/log/"
+
+#······································································
+#定义文件读取函数，将读取出的字符串张量解码为Id, SepalLengthCm等多个按照
+#defaults指定格式的张量并打包拼装好输出
+#······································································
+def read_data(file_queue):
+	reader = tf.TextLineReader(skip_header_lines=1)
+	key, value = reader.read(file_queue)
+	#defaults用于指定矩阵格式以及数据类型，CSV文件中的矩阵是M*N的，则此处为1*N的矩阵，比如矩阵中如果有小数，则为float,[1]应该变为[1.0]
+	defaults = [[0],[0.],[0.],[''],[0.],[0.],[''],[''],
+				[''],[''],[''],[''],[''],[''],[''],[''],
+				[''],[0.],[0.], [0.], [0.],[0.],[''],[''],
+				[0.], [0.], [0.],[0.], [0.], [0.], [0.],[0.], 
+				[0.], [0.],[0.],[0.],[0.], [0.], [0.],[0.], 
+				[0.], [0.],[0.],[0.],['']]
+	#矩阵中有几列，有几列需要写几个
+	ID,Size,Age,Sex,BMI,ASAclassification,Emergency,Department,\
+	Surgerytype,Operation,Surgicalapproach,Surgicalposition,Anesthesiatype,Sevoflurane,Desflurane,PropofolTCI,\
+	RemifentanilTCI,Surgeryduration,Anesthesiaduration,Devices,Parameters,Dataduration,Hypertension,Diabetes,\
+	Hemoglobin,Albumin,Cr,Na,K,RBC,FFP,Crystalloid,\
+	Colloid,Propofolbolus,Midazolambolus,Fentanylbolus,Rocuronium,Vecuronium,Ephedrine,Phenylephrine,\
+	Epinephrine,Calciumchloride,Postoperativestay,PostoperativeICUstay,Mortality= tf.decode_csv(value, defaults) #tf.decode_csv函数得到的是张量
+	#当Species值为不同的时候定义为不同的tf值，表示为exclusive=True只有一个谓词可以评估真
+	
+	preprocess_sex = tf.case({
+		tf.equal(Sex, tf.constant('F')): lambda: tf.constant([0.,1.]),
+		tf.equal(Sex, tf.constant('M')): lambda: tf.constant([1.,0.]),
+	}, lambda: tf.constant([0.,0.]), exclusive=True)
+
+	preprocess_Emergency = tf.case({
+		tf.equal(Emergency, tf.constant('Y')): lambda: tf.constant([1.,0.]),
+		tf.equal(Emergency, tf.constant('N')): lambda: tf.constant([0.,1.]),
+	}, lambda: tf.constant([0.,0.]), exclusive=True)
+
+	preprocess_Department = tf.case({
+		tf.equal(Department, tf.constant('General surgery')): lambda: tf.constant([1.,0.,0.,0.]),
+		tf.equal(Department, tf.constant('Thoracic surgery')): lambda: tf.constant([0.,1.,0.,0.]),
+		tf.equal(Department, tf.constant('Urology')): lambda: tf.constant([0.,0.,1.,0.]),
+		tf.equal(Department, tf.constant('Gynecology')): lambda: tf.constant([0.,0.,0.,1.]),
+	}, lambda: tf.constant([0.,0.,0.,0.]), exclusive=True)
+
+	preprocess_Surgerytype = tf.case({
+		tf.equal(Surgerytype, tf.constant('Colorectal')): lambda: tf.constant([1.,0.,0.,0.,0.,0.,0.,0.,0.,0.,0.]),
+		tf.equal(Surgerytype, tf.constant('Stomach')): lambda: tf.constant([0.,1.,0.,0.,0.,0.,0.,0.,0.,0.,0.]),
+		tf.equal(Surgerytype, tf.constant('Biliary/Pancreas')): lambda: tf.constant([0.,0.,1.,0.,0.,0.,0.,0.,0.,0.,0.]),
+		tf.equal(Surgerytype, tf.constant('Vascular')): lambda: tf.constant([0.,0.,0.,1.,0.,0.,0.,0.,0.,0.,0.]),
+		tf.equal(Surgerytype, tf.constant('Breast')): lambda: tf.constant([0.,0.,0.,0.,1.,0.,0.,0.,0.,0.,0.]),
+		tf.equal(Surgerytype, tf.constant('Transplantation')): lambda: tf.constant([0.,0.,0.,0.,0.,1.,0.,0.,0.,0.,0.]),
+		tf.equal(Surgerytype, tf.constant('Minor resection')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,1.,0.,0.,0.,0.]),
+		tf.equal(Surgerytype, tf.constant('Major resection')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,1.,0.,0.,0.]),
+		tf.equal(Surgerytype, tf.constant('Thyroid')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,1.,0.,0.]),
+		tf.equal(Surgerytype, tf.constant('Others')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,1.,0.]),
+		tf.equal(Surgerytype, tf.constant('Hepatic')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,1.]),
+	}, lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,0.]), exclusive=True)
+	
+	preprocess_Operation = tf.case({
+		tf.equal(Operation, tf.constant('Low anterior resection')): lambda: tf.constant([1.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Subtotal gastrectomy')): lambda: tf.constant([0.,1.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Cholecystectomy')): lambda: tf.constant([0.,0.,1.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Distal gastrectomy')): lambda: tf.constant([0.,0.,0.,1.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Aneurysmal repair')): lambda: tf.constant([0.,0.,0.,0.,1.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Lung wedge resection')): lambda: tf.constant([0.,0.,0.,0.,0.,1.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Breast-conserving surgery')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,1.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Liver transplantation')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,1.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Metastasectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,1.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Pylorus preserving pancreaticoduodenectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,1.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Lung lobectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		1.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Anterior resection')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,1.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Total thyroidectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,1.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Donor hepatectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,1.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Nephrectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,1.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Abdominoperineal resection')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,1.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Kidney transplantation')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,1.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Radical prostatectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,1.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Hemihepatectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,1.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Diagnostic laparoscopy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,1.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Bullectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		1.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Small bowel segmental resection')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,1.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Adrenalectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,1.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Exploratory laparotomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,1.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Ovarian cystectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,1.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Gastric wedge resection')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,1.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Esophagectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,1.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Excision')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,1.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Splenectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,1.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Extended hysterectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,1.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Appendectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		1.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Biopsy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,1.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Hernia repair')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,1.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Gastric bypass')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,1.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Ileostomy repair')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,1.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Spleen preserving distal pancreatectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,1.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Ligation and stripping')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,1.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Endarterectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,1.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Plication')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,1.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Resection of rib')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,1.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Bleeding control')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		1.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Mastectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,1.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Salpingo-oophorectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,1.,0.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Pylorus preserving gastrectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,1.,0.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Pleurodesis')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,1.,0.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Resection of sternum')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,1.,0.,0.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Thymectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,1.,0.,0.,
+		0.]),
+		tf.equal(Operation, tf.constant('Choledochal cyst excision')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,1.,0., 
+		0.]),
+		tf.equal(Operation, tf.constant('Adhesiolysis')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,1.,
+		0.]),
+		tf.equal(Operation, tf.constant('Completion thyroidectomy')): lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		1.]),
+	}, lambda: tf.constant([0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,\
+		0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,
+		0.]), exclusive=True)
+
+	preprocess_Surgicalapproach = tf.case({
+		tf.equal(Surgicalapproach, tf.constant('Open')): lambda: tf.constant([0.,1.]),
+		tf.equal(Surgicalapproach, tf.constant('Videoscopic')): lambda: tf.constant([1.,0.]),
+	}, lambda: tf.constant([0.,0.]), exclusive=True)
+
+	preprocess_Surgicalposition = tf.case({
+		tf.equal(Surgicalposition, tf.constant('Lithotomy')): lambda: tf.constant([1.,0.,0.,0.,0.,0.]),
+		tf.equal(Surgicalposition, tf.constant('Supine')): lambda: tf.constant([0.,1.,0.,0.,0.,0.]),
+		tf.equal(Surgicalposition, tf.constant('Reverse Trendelenburg')): lambda: tf.constant([0.,0.,1.,0.,0.,0.]),
+		tf.equal(Surgicalposition, tf.constant('Prone')): lambda: tf.constant([0.,0.,0.,1.,0.,0.]),
+		tf.equal(Surgicalposition, tf.constant('Left lateral decubitus')): lambda: tf.constant([0.,0.,0.,0.,1.,0.]),
+		tf.equal(Surgicalposition, tf.constant('Right lateral decubitus')): lambda: tf.constant([0.,0.,0.,0.,0.,1.]),
+	}, lambda: tf.constant([0.,0.,0.,0.,0.,0.]), exclusive=True)
+
+	preprocess_Sevoflurane = tf.case({
+		tf.equal(Sevoflurane, tf.constant('Y')): lambda: tf.constant([0.,1.]),
+		tf.equal(Sevoflurane, tf.constant('N')): lambda: tf.constant([1.,0.]),
+	}, lambda: tf.constant([0.,0.]), exclusive=True)
+
+	preprocess_Desflurane = tf.case({
+		tf.equal(Desflurane, tf.constant('Y')): lambda: tf.constant([0.,1.]),
+		tf.equal(Desflurane, tf.constant('N')): lambda: tf.constant([1.,0.]),
+	}, lambda: tf.constant([0.,0.]), exclusive=True)
+
+	preprocess_PropofolTCI = tf.case({
+		tf.equal(PropofolTCI, tf.constant('Y')): lambda: tf.constant([0.,1.]),
+		tf.equal(PropofolTCI, tf.constant('N')): lambda: tf.constant([1.,0.]),
+	}, lambda: tf.constant([0.,0.]), exclusive=True)
+
+	preprocess_RemifentanilTCI = tf.case({
+		tf.equal(RemifentanilTCI, tf.constant('Y')): lambda: tf.constant([0.,1.]),
+		tf.equal(RemifentanilTCI, tf.constant('N')): lambda: tf.constant([1.,0.]),
+	}, lambda: tf.constant([0.,0.]), exclusive=True)
+
+	preprocess_Hypertension = tf.case({
+		tf.equal(Hypertension, tf.constant('Y')): lambda: tf.constant([0.,1.]),
+		tf.equal(Hypertension, tf.constant('N')): lambda: tf.constant([1.,0.]),
+	}, lambda: tf.constant([0.,0.]), exclusive=True)
+
+	preprocess_Diabetes = tf.case({
+		tf.equal(Diabetes, tf.constant('Y')): lambda: tf.constant([0.,1.]),
+		tf.equal(Diabetes, tf.constant('N')): lambda: tf.constant([1.,0.]),
+	}, lambda: tf.constant([0.,0.]), exclusive=True)
+	#[tf.pack] 和 [tf.unpack] 弃用，改为 [tf.stack] 和 [tf.unstack]。加载数据
+	return tf.stack([Age,BMI,preprocess_sex[0],preprocess_sex[1],\
+	preprocess_Operation[0],preprocess_Operation[1],preprocess_Operation[2],preprocess_Operation[3],preprocess_Operation[4],preprocess_Operation[5],preprocess_Operation[6],preprocess_Operation[7],\
+	preprocess_Operation[8],preprocess_Operation[9],preprocess_Operation[10],preprocess_Operation[11],preprocess_Operation[12],preprocess_Operation[13],preprocess_Operation[14],preprocess_Operation[15],\
+	preprocess_Operation[16],preprocess_Operation[17],preprocess_Operation[18],preprocess_Operation[19],preprocess_Operation[20],preprocess_Operation[21],preprocess_Operation[22],preprocess_Operation[23],\
+	preprocess_Operation[24],preprocess_Operation[25],preprocess_Operation[26],preprocess_Operation[27],preprocess_Operation[28],preprocess_Operation[29],preprocess_Operation[30],preprocess_Operation[31],\
+	preprocess_Operation[32],preprocess_Operation[33],preprocess_Operation[34],preprocess_Operation[35],preprocess_Operation[36],preprocess_Operation[37],preprocess_Operation[38],preprocess_Operation[39],\
+	preprocess_Operation[40],preprocess_Operation[41],preprocess_Operation[42],preprocess_Operation[43],preprocess_Operation[44],preprocess_Operation[45],preprocess_Operation[46],preprocess_Operation[47],\
+	preprocess_Operation[48],preprocess_Operation[49],preprocess_Operation[50],\
+	ASAclassification,preprocess_Emergency[0],preprocess_Emergency[1],\
+	preprocess_Department[0],preprocess_Department[1],preprocess_Department[2],preprocess_Department[3],\
+	preprocess_Surgerytype[0],preprocess_Surgerytype[1],preprocess_Surgerytype[2],preprocess_Surgerytype[3],preprocess_Surgerytype[4],preprocess_Surgerytype[5],preprocess_Surgerytype[6],preprocess_Surgerytype[7],\
+	preprocess_Surgerytype[8],preprocess_Surgerytype[9],preprocess_Surgerytype[10],\
+	preprocess_Surgicalapproach[0],preprocess_Surgicalapproach[1],\
+
+	preprocess_Sevoflurane[0],preprocess_Sevoflurane[1],\
+	preprocess_Desflurane[0],preprocess_Desflurane[1],\
+	preprocess_PropofolTCI[0],preprocess_PropofolTCI[1],\
+	preprocess_RemifentanilTCI[0],preprocess_RemifentanilTCI[1],\
+
+	preprocess_Hypertension[0],preprocess_Hypertension[1],\
+	preprocess_Diabetes[0],preprocess_Diabetes[1],\
+
+	Surgeryduration,Anesthesiaduration,\
+	Hemoglobin,Albumin,Cr,Na,K,RBC,FFP,Crystalloid,\
+	Colloid,Propofolbolus,Midazolambolus,Fentanylbolus,Rocuronium,Vecuronium,Ephedrine,Phenylephrine,\
+	Epinephrine,Calciumchloride]), tf.stack([Postoperativestay])  #把多个张量打包成一个张量 #2
+
+
+
+#···································································
+#给一个文件名读取队列，按顺序读取文件并生成张量
+#将从read_data中读取的张量按照一定格式组装成batch输出准备喂入神将网络
+#···································································
+def create_pipeline(filename, batch_size, num_epochs=None,shuffle_y=True):
+	file_queue = tf.train.string_input_producer([filename], num_epochs=num_epochs,shuffle=shuffle_y)
+	example, CBUstay = read_data(file_queue)
+
+	min_after_dequeue = MIN_AFTER_DEQUEUE
+	capacity = min_after_dequeue + batch_size
+	#shuffle(file_queue中的参数)的作用在于指定是否需要随机打乱样本的顺序，一般作用于训练阶段，提高鲁棒性。
+	#1、当shuffle = false时，每次dequeue是从队列中按顺序取数据，遵从先入先出的原则
+	#2、当shuffle = true时，每次从队列中dequeue取数据时，不再按顺序，而是随机的，所以打乱了样本的原有顺序。
+	#这个参数min_after_dequeue的意思是队列中，做dequeue（取数据）的操作后，queue runner线程要保证队列中至少剩下min_after_dequeue个数据。
+	#如果min_after_dequeue设置的过少，则即使shuffle为true，也达不到好的混合效果。
+	#这个地方可能不太好理解，我尝试解释一下吧，但可能解释的不太好。
+	#假设你有一个队列，现在里面有m个数据，你想要每次随机从队列中取n个数据，则代表先混合了m个数据，再从中取走n个。
+	#当第一次取走n个后，队列就变为m-n个数据；
+	#当你下次再想要取n个时，假设队列在此期间插进来了k个数据，则现在的队列中有
+	#(m-n+k)个数据，则此时会从混合的(m-n+k)个数据中随机取走n个，。如果队列填充的速度比较慢，k就比较小，那你取出来的n个数据只是与周围很小的一部分(m-n+k)个数据进行了混合。
+	#因为我们的目的肯定是想尽最大可能的混合数据，因此设置min_after_dequeue，可以保证每次dequeue后都有足够量的数据填充尽队列，保证下次dequeue时可以很充分的混合数据。
+	#但是min_after_dequeue也不能设置的太大，这样会导致队列填充的时间变长，尤其是在最初的装载阶段，会花费比较长的时间。
+	example_batch, label_batch = tf.train.batch([example, CBUstay], 
+	batch_size=batch_size, capacity=capacity
+	#min_after_dequeue=min_after_dequeue
+	)
+
+	return example_batch, label_batch
+
+
+
+
+def variable_summaries(var,name):
+	with tf.name_scope('summaries'):
+
+		#将张量中的取值分布记录到日志之中,形式为直方图
+		tf.summary.histogram(name,var)
+
+		#记录张量的平均值，形式为曲线
+		mean=tf.reduce_mean(var)
+		tf.summary.scalar('mean/'+name,mean)
+		
+		#记录张量的标准差，形式为曲线
+		stddev=tf.sqrt(tf.reduce_mean(tf.square(var-mean)))
+		tf.summary.scalar('stddev/'+name,stddev)
+
+
+#················································
+#定义每一层的前向传播
+#················································
+def nn_layer(input_tensor,input_dim,output_dim,layer_name,regularizer,mean=0,stddev=0.1,act=tf.nn.relu):
+	with tf.variable_scope(layer_name):
+
+		#由输入层到隐藏层的变量参数weights，同时加入l2正则化
+		with tf.name_scope('weights'):
+			weights=tf.Variable(tf.truncated_normal([input_dim,output_dim],stddev=0.1))
+			if regularizer != None: tf.add_to_collection('losses', tf.contrib.layers.l2_regularizer(regularizer)(weights))
+			variable_summaries(weights,layer_name+'/weights')
+
+		#定义每一个隐藏层的偏置项
+		with tf.name_scope('biases'):
+			biases=tf.Variable(tf.constant(0.0,shape=[output_dim]))
+			variable_summaries(biases,layer_name+'/biases')
+		
+		#定义每一层的运算即使用的激活函数
+		with tf.name_scope('Wx_plus_b'):
+			preactivate=tf.matmul(input_tensor,weights)+biases
+			#激活之前参数
+			tf.summary.histogram(layer_name+'/pre_preactivation',preactivate)
+		
+		#激活函数
+		activations=act(preactivate,name='activation')
+		#写入激活函数之后的参数
+		tf.summary.histogram(layer_name+'/activations',preactivate)
+		return activations
+		
+
+
+#··················································
+#定义反向传播算法
+#··················································
+def mazui_backward(file_name_train,file_name_test):
+
+	with tf.name_scope('input'):
+		#用placeholder给训练数据x和标签y_占位
+		x = tf.placeholder(tf.float32, [None, INPUT_NODE],name='x-input')
+		y_ = tf.placeholder(tf.float32, [None,OUTPUT_NODE],name='y-input')
+
+	#得到可以喂入神经网络的batch，num_epochs表示每个文件被读取的次数
+	x_train_batch, y_train_batch = create_pipeline(file_name_train,BATCH_SIZE, num_epochs=20) 
+	x_test_batch, y_test_batch = create_pipeline(file_name_test,100,1,False) 
+	#得到用于测试的batch
+	
+	#用于记录当前神经网络运算的轮次
+	global_step = tf.Variable(0, trainable=False)
+	
+	#调用forward函数来实现前向传播算法
+	pre_input=tf.nn.sigmoid(x)
+	hidden1=nn_layer(x, INPUT_NODE,LAYER1_NODE,'layer1',REGULARIZER)
+	#hidden2=nn_layer(hidden1, LAYER1_NODE,LAYER2_NODE,'layer2',REGULARIZER)
+	#hidden3=nn_layer(hidden2, LAYER2_NODE,LAYER3_NODE,'layer3',REGULARIZER)
+	y=nn_layer(hidden1, LAYER1_NODE,OUTPUT_NODE,'layer2',REGULARIZER,act=tf.identity)
+		
+	with tf.name_scope('loss_fuction'):
+		#注意这里的tf.argmax函数返回的是一个一位数组，这个一位数组的每个元素表达y_每行中最大元素的索引值
+		#这也解释了为什么鸢尾花数据集中将最后的标签直接设置为一个数值张量，那里就不需要使用这个函数了
+		#注意如果传入的标签是一维数组时才需要用这个函数
+		#ce = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=y, labels=y_)
+		cem = tf.reduce_mean(tf.square(y_-y))
+		#总的损失函数
+		loss = cem + tf.add_n(tf.get_collection('losses'))
+		tf.summary.scalar('loss_value',loss)
+
+	with tf.name_scope('moving_average'):
+		#定义参数的滑动平均
+		variable_averages = tf.train.ExponentialMovingAverage(MOVING_AVERAGE_DECAY, global_step)
+		variable_averages_op = variable_averages.apply(tf.trainable_variables())
+
+
+
+	with tf.name_scope('train_step'):
+		#设定指数衰减学习率learning_rate
+		learning_rate = tf.train.exponential_decay(
+			LEARNING_RATE_BASE, #初始学习率
+			global_step, #当前训练轮数
+			EXAMPLES/ BATCH_SIZE, #衰减速率，表示整个数据集需要训练的轮数
+			LEARNING_RATE_DECAY,	#初始衰减系数，接近1
+			staircase=True)	#True表示取整，表示对衰减率取整，衰减率呈现阶梯状下降
+
+		#使用梯度衰减算法对模型优化，降低损失函数
+		#train_step = tf.train.GradientDescentOptimizer(learning_rate).minimize(loss, global_step=global_step)
+		#train_step = tf.train.MomentumOptimizer(learning_rate,0.9).minimize(loss, global_step=global_step)
+		train_step = tf.train.AdamOptimizer(learning_rate).minimize(loss, global_step=global_step)
+		#实例化可还原滑动平均的saver 
+		#在模型训练时引入滑动平均可以使模型在测试数据上表现的更加健壮
+		with tf.control_dependencies([train_step,variable_averages_op]):
+			train_op = tf.no_op(name='train')
+
+	#定义测试，这里需要注意传入的标签和最后输出的是否为同一种类型的数据
+	#correct_prediction = tf.equal(y,y_)
+
+	with tf.name_scope('accuracy'):
+		accuracy = tf.reduce_mean(tf.square(y_-tf.round(y)))
+		#把模型预测的准确率以折线形式输出到日志之中
+		sum_acc=tf.summary.scalar('accuracy',accuracy)
+
+	#模型存储
+	saver=tf.train.Saver()
+
+	#模型运行时相关日志存储
+	merged=tf.summary.merge_all()
+
+
+	#开始执行
+	with tf.Session() as sess:
+		#所有参数初始化
+		init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
+		sess.run(init_op)
+
+		#初始化写日志
+		summary_writer=tf.summary.FileWriter(META_DIR,sess.graph)
+        
+		#启动队列读取线程
+		coord = tf.train.Coordinator()
+		threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+		
+		#得到batch
+		#curr_x_train_batch, curr_y_train_batch = sess.run([x_train_batch, y_train_batch])
+		curr_x_test_batch, curr_y_test_batch = sess.run([x_test_batch, y_test_batch])
+		try:
+			#开始训练
+			print("Training: ")
+			count=0			
+			while not coord.should_stop():
+				#得到batch
+				curr_x_train_batch, curr_y_train_batch = sess.run([x_train_batch, y_train_batch])
+				#喂入batch，这里注意喂入的是数组还是数字，如果是数组标签，损失函数需要注意转为数字，如果是数字，则不需要
+				#注意这里的merged包括了accuracy，执行的时候也会顺便将其执行，但此时喂入的数据是训练数据，而非测试数据
+				summary,_, step = sess.run([merged,train_op,global_step], feed_dict={x: curr_x_train_batch, y_:curr_y_train_batch})
+				pre,loss_value,y_result=sess.run([pre_input,loss,y], feed_dict={x: curr_x_train_batch, y_:curr_y_train_batch})
+				#再次执行sum_test
+				y_test,sum_test,test_acc = sess.run([y,sum_acc,accuracy], feed_dict={x: curr_x_test_batch,y_: curr_y_test_batch})
+
+				count += 1
+				if count%10==0:
+					print("After %d training step(s), loss on training batch is %g." % (step, loss_value))
+					#print("accuarcy=%g"% (test_acc))
+					print("accuarcy=%g",test_acc)
+					print(y_test)
+					#print(pre)
+					#print("After" count "training step(s), accuarcy=",test_acc)
+					#保存文件路径
+					saver.save(sess,os.path.join(MODEL_SAVE_PATH,MODEL_NAME),global_step=global_step)
+				
+				#将相关日志写入文件，注意这里写入的accuracy会覆盖之前写入的喂入训练数据的accuracy
+				summary_writer.add_summary(summary,count)
+				summary_writer.add_summary(sum_test,count)
+		except tf.errors.OutOfRangeError:
+			print('Done training -- epoch limit reached')
+		finally:
+			# When done, ask the threads to stop.
+			coord.request_stop()
+		coord.join(threads)
+
+
+		#写入计算图到文件中
+		#writer=tf.summary.FileWriter(META_DIR,tf.get_default_graph())
+		summary_writer.close()
+
+def main():
+	#读入mnist
+	#mnist = input_data.read_data_sets("./data/", one_hot=True)
+	#反向传播
+	mazui_backward(FILENAME_TRAIN,FILENAME_TEST)
+
+if __name__ == '__main__':
+	#print("here")
+	main()
